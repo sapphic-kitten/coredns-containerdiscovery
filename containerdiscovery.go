@@ -110,7 +110,7 @@ func newContainerLabel(socketPath string, exposeByDefault bool, label string, ne
 		return nil, ErrSocketPathNotAbsolute
 	}
 
-	socketURL, err := url.Parse("uinix://" + socketPath)
+	socketURL, err := url.Parse("unix://" + socketPath)
 	if err != nil {
 		return nil, err
 	}
