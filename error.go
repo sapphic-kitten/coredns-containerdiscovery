@@ -9,7 +9,7 @@ var (
 	ErrLabelLength           = errors.New("label length must be between 3 and 30 characters")
 	ErrLabelInvalidCharacter = errors.New("invalid character in label")
 	ErrSocketPathNotAbsolute = errors.New("socketPath has to be absolute")
-	ErrNoFQDN                = errors.New("could not build FQDN")
+	ErrNoDomainName          = errors.New("could not build domain name")
 )
 
 type InvalidDomainError struct {

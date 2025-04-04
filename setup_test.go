@@ -57,7 +57,7 @@ func Test_setup(t *testing.T) {
 			true,
 		},
 		{
-			"missing arg value",
+			"unknown arg value",
 			`containers /path/to/socket {
 					unknown arg
 				}`,

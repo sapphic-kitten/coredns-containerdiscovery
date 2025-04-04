@@ -2,7 +2,6 @@ package containerdiscovery
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/url"
 	"strings"
@@ -120,7 +119,7 @@ func newContainerLabel(socketPath string, exposeByDefault bool, label string, ne
 		return nil, err
 	}
 
-	if _, ok := dns.IsDomainName(baseDomain); !ok {
+	if _, ok := dns.IsDomainName(baseDomain); len(baseDomain) > 0 && !ok {
 		return nil, NewInvalidDomainError(baseDomain)
 	}
 
@@ -226,11 +225,11 @@ func (cd *ContainerDiscovery) addRecords(inspect *define.InspectContainerData) e
 		domain = strings.ToLower(strings.ReplaceAll(inspect.Name, "/", ""))
 	}
 
-	if cd.baseDomain != "" {
+	if len(cd.baseDomain) > 0 {
 		domain = dnsutil.Join(domain, cd.baseDomain)
 	}
 
-	if cd.network != "" {
+	if len(cd.network) > 0 {
 		network, ok := inspect.NetworkSettings.Networks[cd.network]
 		if !ok {
 			return NewUnknownNetworkError(cd.network)
@@ -301,8 +300,8 @@ func (cd *ContainerDiscovery) removeRecords(inspect *define.InspectContainerData
 		domain = strings.ToLower(strings.ReplaceAll(inspect.Name, "/", ""))
 	}
 
-	if domain != "" {
-		domain = fmt.Sprintf("%s.%s", domain, cd.baseDomain)
+	if len(cd.baseDomain) > 0 {
+		domain = dnsutil.Join(domain, cd.baseDomain)
 	}
 
 	value, ok := inspect.Config.Labels[buildLabel(cd.label, labelDomain)]
@@ -310,11 +309,11 @@ func (cd *ContainerDiscovery) removeRecords(inspect *define.InspectContainerData
 		domain = value
 	}
 
-	if domain == "" {
-		return ErrNoFQDN
+	if _, ok := dns.IsDomainName(domain); !ok {
+		return ErrNoDomainName
 	}
 
-	cd.records.delete(domain)
+	cd.records.delete(dns.Fqdn(domain))
 	return nil
 }
 

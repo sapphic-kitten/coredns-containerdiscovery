@@ -26,8 +26,9 @@ type config struct {
 
 func defaultConfig() *config {
 	return &config{
-		socketPath: defaultSocket,
-		label:      defaultLabel,
+		socketPath:       defaultSocket,
+		label:            defaultLabel,
+		useContainerName: true,
 	}
 }
 
