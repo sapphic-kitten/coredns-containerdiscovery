@@ -1,23 +1,26 @@
 package containerdiscovery
 
 import (
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/miekg/dns"
 )
 
 const (
-	defaultSocket = "/var/run/podman/podman.sock"
+	defaultSocket = "unix:///var/run/podman/podman.sock"
 	defaultLabel  = "coredns"
 )
 
 type config struct {
-	socketPath       string
+	endpoint         string
 	exposeByDefault  bool
-	label            string
+	labelPrefix      string
 	network          string
 	baseDomain       string
 	useContainerName bool
@@ -26,8 +29,8 @@ type config struct {
 
 func defaultConfig() *config {
 	return &config{
-		socketPath:       defaultSocket,
-		label:            defaultLabel,
+		endpoint:         defaultSocket,
+		labelPrefix:      defaultLabel,
 		useContainerName: true,
 	}
 }
@@ -40,42 +43,39 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error(pluginName, err)
 	}
 
-	cl, err := newContainerLabel(
-		config.socketPath,
-		config.exposeByDefault,
-		config.label,
-		config.network,
-		config.baseDomain,
-		config.useContainerName,
-		config.useHostName,
-	)
-	if err != nil {
-		return err
-	}
-
+	cl := newContainerDiscovery(config)
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		c.OnStartup(cl.OnStartup)
-		c.OnShutdown(cl.OnShutdown)
 		cl.Next = next
 		return cl
+	})
+
+	c.OnStartup(func() error {
+		return cl.OnStartup()
+	})
+
+	c.OnShutdown(func() error {
+		return cl.OnShutdown()
 	})
 
 	return nil
 }
 
 func stringArg(c *caddy.Controller) (string, error) {
+	key := c.Val()
 	if !c.NextArg() {
 		return "", c.ArgErr()
+	}
+	if len(c.Val()) == 0 {
+		return "", c.Errf("expected value for %q", key)
 	}
 	return c.Val(), nil
 }
 
 func boolArg(c *caddy.Controller) (bool, error) {
-	key := c.Val()
 	if c.NextArg() {
 		arg, err := strconv.ParseBool(c.Val())
 		if err != nil {
-			return false, c.Errf("%q: expected boolean, got %q", key, c.Val())
+			return false, c.SyntaxErr("boolean")
 		}
 		return arg, nil
 	}
@@ -93,7 +93,15 @@ func parse(c *caddy.Controller) (*config, error) {
 		}
 
 		if len(args) == 1 {
-			config.socketPath = args[0]
+			url, err := url.Parse(args[0])
+			if err != nil {
+				return nil, err
+			}
+
+			if !url.IsAbs() {
+				return nil, c.Err("invalid endpoint url")
+			}
+			config.endpoint = args[0]
 		}
 
 		for c.NextBlock() {
@@ -104,19 +112,31 @@ func parse(c *caddy.Controller) (*config, error) {
 				}
 
 			case "label":
-				if config.label, err = stringArg(c); err != nil {
+				labelPrefix, err := stringArg(c)
+				if err != nil {
 					return nil, err
 				}
 
-			case "network":
-				if config.network, err = stringArg(c); err != nil {
-					return nil, err
+				if len(labelPrefix) < 3 || len(labelPrefix) > 30 {
+					return nil, c.Err("label length must be between 3 and 30 characters")
 				}
+
+				pattern := regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+				if !pattern.MatchString(labelPrefix) {
+					return nil, c.Err("invalid character in labelPrefix")
+				}
+				config.labelPrefix = labelPrefix
 
 			case "basedomain":
-				if config.baseDomain, err = stringArg(c); err != nil {
+				baseDomain, err := stringArg(c)
+				if err != nil {
 					return nil, err
 				}
+
+				if _, ok := dns.IsDomainName(baseDomain); !ok {
+					return nil, c.Errf("invalid baseDomain %q", baseDomain)
+				}
+				config.baseDomain = baseDomain
 
 			case "usecontainername":
 				if config.useContainerName, err = boolArg(c); err != nil {

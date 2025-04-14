@@ -29,7 +29,7 @@ func Test_setup(t *testing.T) {
 		},
 		{
 			"config with options",
-			`containers /var/run/user/1000/podman/podman.sock {
+			`containers unix:///var/run/user/1000/podman/podman.sock {
 					exposeByDefault true
 					label coredns.zone1
 					baseDomain test.local
@@ -51,14 +51,14 @@ func Test_setup(t *testing.T) {
 		},
 		{
 			"missing arg value",
-			`containers /path/to/socket {
-					label
+			`containers unix:///path/to/socket {
+					label ""
 				}`,
 			true,
 		},
 		{
 			"unknown arg value",
-			`containers /path/to/socket {
+			`containers unix:///path/to/socket {
 					unknown arg
 				}`,
 			true,
