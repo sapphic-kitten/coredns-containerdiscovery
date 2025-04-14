@@ -26,3 +26,7 @@ go.work.sum
 
 # vscode files
 .vscode
+
+# exclude mod and sum for coredns plugins
+go.mod
+go.sum
