@@ -13,7 +13,6 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/dnsutil"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -206,7 +205,7 @@ func (cd *ContainerDiscovery) run() {
 	}
 }
 
-func (cd *ContainerDiscovery) addRecords(inspect types.ContainerJSON) error {
+func (cd *ContainerDiscovery) addRecords(inspect container.InspectResponse) error {
 	var domain string
 	var records []record
 
@@ -295,7 +294,7 @@ func (cd *ContainerDiscovery) addRecords(inspect types.ContainerJSON) error {
 	return nil
 }
 
-func (cd *ContainerDiscovery) removeRecords(inspect types.ContainerJSON) error {
+func (cd *ContainerDiscovery) removeRecords(inspect container.InspectResponse) error {
 	var domain string
 	if cd.useHostName {
 		domain = inspect.Config.Hostname

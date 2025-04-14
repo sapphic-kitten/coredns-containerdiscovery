@@ -11,7 +11,6 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/plugin/pkg/dnsutil"
 	"github.com/coredns/coredns/plugin/test"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/miekg/dns"
@@ -178,8 +177,8 @@ func TestContainerDiscovery(t *testing.T) {
 				useHostName:      false,
 				name:             "test1",
 				labels: map[string]string{
-					"coredns.A":     "127.0.0.1",
-					"coredns.CNAME": "localhost",
+					"coredns.record.a":     "127.0.0.1",
+					"coredns.record.cname": "localhost",
 				},
 				network: nil,
 			},
@@ -202,14 +201,14 @@ func TestContainerDiscovery(t *testing.T) {
 				Next:             nil,
 			}
 
-			inspect := types.ContainerJSON{
-				ContainerJSONBase: &types.ContainerJSONBase{
+			inspect := container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
 					Name: tt.args.name,
 				},
 				Config: &container.Config{
 					Labels: tt.args.labels,
 				},
-				NetworkSettings: &types.NetworkSettings{},
+				NetworkSettings: &container.NetworkSettings{},
 			}
 			for name, ip := range tt.args.network {
 				inspect.NetworkSettings.Networks[name] = &network.EndpointSettings{
