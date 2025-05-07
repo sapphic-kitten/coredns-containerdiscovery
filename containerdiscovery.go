@@ -206,6 +206,8 @@ func (cd *ContainerDiscovery) run() {
 }
 
 func (cd *ContainerDiscovery) addRecords(inspect container.InspectResponse) error {
+	clog.Debugf("adding records for container %q", inspect.Name)
+
 	var domain string
 	var records []record
 
@@ -288,6 +290,10 @@ func (cd *ContainerDiscovery) addRecords(inspect container.InspectResponse) erro
 
 	if len(records) == 0 {
 		log.Infof("no record for container %q created", inspect.Name)
+	}
+
+	for _, record := range records {
+		clog.Debugf("created record %q, type %q", record.Value, record.Type)
 	}
 
 	cd.records.set(dns.Fqdn(domain), records)
