@@ -75,3 +75,27 @@ func NewInvalidCNAMERecordError(record string) error {
 func (e InvalidCNAMERecordError) Error() string {
 	return fmt.Sprintf("invalid CNAME record %q", e.record)
 }
+
+type MalformedLabelError struct {
+	label string
+}
+
+func NewMalformedLabelError(label string) error {
+	return MalformedLabelError{label}
+}
+
+func (e MalformedLabelError) Error() string {
+	return fmt.Sprintf("malformed label %q", e.label)
+}
+
+type UnknownLabelError struct {
+	label string
+}
+
+func NewUnknownLabelError(label string) error {
+	return UnknownLabelError{label}
+}
+
+func (e UnknownLabelError) Error() string {
+	return fmt.Sprintf("unknown label %q", e.label)
+}

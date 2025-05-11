@@ -11,6 +11,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/dnsutil"
+	"github.com/coredns/coredns/plugin/pkg/fall"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
 	"github.com/docker/docker/api/types/container"
@@ -21,16 +22,6 @@ import (
 )
 
 const pluginName = "containers"
-
-const (
-	labelEnable  = "enable"
-	labelNetwork = "network"
-	labelDomain  = "domain"
-	labelA       = "record.a"
-	labelAAAA    = "record.aaaa"
-	labelCNAME   = "record.cname"
-	labelTXT     = "record.txt"
-)
 
 var log = clog.NewWithPlugin(pluginName)
 
@@ -102,10 +93,12 @@ type ContainerDiscovery struct {
 	cancel  context.CancelFunc
 
 	Next plugin.Handler
+	Fall fall.F
 }
 
 func newContainerDiscovery(cfg *config) *ContainerDiscovery {
 	ctx, cancel := context.WithCancel(context.Background())
+
 	return &ContainerDiscovery{
 		socketURL:        cfg.endpoint,
 		exposedByDefault: cfg.exposeByDefault,
@@ -121,14 +114,14 @@ func newContainerDiscovery(cfg *config) *ContainerDiscovery {
 }
 
 func (cd *ContainerDiscovery) run() {
-	cli, err := client.NewClientWithOpts(client.WithHost(cd.socketURL), client.WithAPIVersionNegotiation())
-	defer cli.Close()
+	client, err := client.NewClientWithOpts(client.WithHost(cd.socketURL), client.WithAPIVersionNegotiation())
 
 	if err != nil {
 		log.Fatalf("failed to connect to socket %q: %v", cd.socketURL, err)
 	}
+	defer client.Close()
 
-	enableFilter := fmt.Sprintf("%s.%s=true", cd.labelPrefix, labelEnable)
+	enableFilter := fmt.Sprintf("%s.enable=true", cd.labelPrefix)
 	listOptions := container.ListOptions{
 		Filters: filters.NewArgs(filters.KeyValuePair{Key: "status", Value: "running"}),
 	}
@@ -137,13 +130,13 @@ func (cd *ContainerDiscovery) run() {
 	}
 
 	log.Debug("listing containers...")
-	containerList, err := cli.ContainerList(cd.ctx, listOptions)
+	containerList, err := client.ContainerList(cd.ctx, listOptions)
 	if err != nil {
 		log.Fatalf("failed to list containers: %v", err)
 	}
 
 	for _, container := range containerList {
-		inspect, err := cli.ContainerInspect(cd.ctx, container.ID)
+		inspect, err := client.ContainerInspect(cd.ctx, container.ID)
 		if err != nil {
 			log.Fatalf("failed to inspect container %q: %v", container.ID, err)
 		}
@@ -163,13 +156,13 @@ func (cd *ContainerDiscovery) run() {
 		eventOptions.Filters.Add("label", enableFilter)
 	}
 
-	eventChan, errChan := cli.Events(cd.ctx, eventOptions)
+	eventChan, errChan := client.Events(cd.ctx, eventOptions)
 
 	for {
 		select {
 		case event := <-eventChan:
 			log.Debugf("container event fired: %q, %q", event.Action, event.Actor.ID)
-			inspect, err := cli.ContainerInspect(cd.ctx, event.Actor.ID)
+			inspect, err := client.ContainerInspect(cd.ctx, event.Actor.ID)
 			if err != nil {
 				log.Errorf("inspect failed on container %q: %v", event.Actor.ID, err)
 				continue
@@ -177,29 +170,28 @@ func (cd *ContainerDiscovery) run() {
 
 			switch event.Action {
 			case events.ActionStart:
-				log.Debugf("adding records...")
+				log.Debugf("adding records for %q", inspect.Name)
 				if err := cd.addRecords(inspect); err != nil {
-					log.Errorf("failed to add records for %q: %v", event.Actor.ID, err)
+					log.Errorf("failed to add records for %q: %v", inspect.Name, err)
 				}
 
 			case events.ActionDie:
-				log.Debugf("removing records...")
+				log.Debugf("removing records for %q", inspect.Name)
 				if err := cd.removeRecords(inspect); err != nil {
-					log.Errorf("failed to remove records for %q: %v", event.Actor.ID, err)
+					log.Errorf("failed to remove records for %q: %v", inspect.Name, err)
 				}
 			}
 
 		case err := <-errChan:
 			if errors.Is(err, io.EOF) {
-				log.Info("connection closed, shutting down")
+				log.Info("connection to container engine closed")
 				cd.cancel()
-				return
 			} else if err != nil {
 				log.Errorf("error while listening to container engine events: %v", err)
 			}
 
 		case <-cd.ctx.Done():
-			log.Info("connection closed, shutting down")
+			log.Info("shutting down")
 			return
 		}
 	}
@@ -208,120 +200,149 @@ func (cd *ContainerDiscovery) run() {
 func (cd *ContainerDiscovery) addRecords(inspect container.InspectResponse) error {
 	clog.Debugf("adding records for container %q", inspect.Name)
 
-	var domain string
-	var records []record
-
-	if cd.useContainerName {
-		domain = strings.ToLower(strings.ReplaceAll(inspect.Name, "/", ""))
+	groups, err := parseLabels(inspect.Config.Labels, cd.labelPrefix)
+	if err != nil {
+		return err
 	}
 
-	if cd.useHostName {
-		domain = inspect.Config.Hostname
-	}
+	for group, labels := range groups {
+		var domain string
+		var networkName string
+		var records []record
 
-	domain = dnsutil.Join(domain, cd.baseDomain)
+		hasCNAME := false
+		for _, label := range labels {
+			switch label.Type {
+			case Domain:
+				domain = label.Value
 
-	if value, ok := inspect.Config.Labels[fmt.Sprintf("%s.%s", cd.labelPrefix, labelDomain)]; ok {
-		domain = value
-	}
+			case Network:
+				networkName = label.Value
 
-	if _, ok := dns.IsDomainName(domain); !ok {
-		return NewInvalidDomainError(domain)
-	}
-
-	var hasCNAME bool = false
-	for fullLabel, value := range inspect.Config.Labels {
-		if label, found := strings.CutPrefix(fullLabel, fmt.Sprintf("%s.", cd.labelPrefix)); found {
-			switch label {
-			case labelA:
-				ip := net.ParseIP(value)
+			case A:
+				ip := net.ParseIP(label.Value)
 				if ip == nil || ip.To4() == nil {
-					return NewInvalidARecordError(value)
+					return NewInvalidARecordError(label.Value)
 				}
 				records = append(records, record{dns.TypeA, ip})
 
-			case labelAAAA:
-				ip := net.ParseIP(value)
+			case AAAA:
+				ip := net.ParseIP(label.Value)
 				if ip == nil || ip.To16() == nil {
-					return NewInvalidAAAARecordError(value)
+					return NewInvalidAAAARecordError(label.Value)
 				}
 				records = append(records, record{dns.TypeAAAA, ip})
 
-			case labelCNAME:
-				if _, ok := dns.IsDomainName(value); !ok {
-					return NewInvalidCNAMERecordError(value)
+			case CNAME:
+				if _, ok := dns.IsDomainName(label.Value); !ok {
+					return NewInvalidCNAMERecordError(label.Value)
 				}
 				if !hasCNAME {
 					hasCNAME = true
-					records = append(records, record{dns.TypeCNAME, dns.Fqdn(value)})
+					records = append(records, record{dns.TypeCNAME, dns.Fqdn(label.Value)})
 				} else {
-					log.Warningf("multiple CNAME records defined %q", inspect.Name)
+					log.Warningf("multiple CNAME records defined in group %q of %q", group, inspect.Name)
 				}
 
-			case labelTXT:
-				records = append(records, record{dns.TypeTXT, strings.Fields(value)})
+			case TXT:
+				records = append(records, record{dns.TypeTXT, strings.Fields(label.Value)})
 			}
 		}
-	}
 
-	if networkName, ok := inspect.Config.Labels[fmt.Sprintf("%s.%s", cd.labelPrefix, labelNetwork)]; ok && len(networkName) > 0 {
-		var IPAddress string
-		if strings.ToLower(networkName) == "default" {
-			IPAddress = inspect.NetworkSettings.IPAddress
-		} else {
-			log.Debugf("using network %q", networkName)
-			network, ok := inspect.NetworkSettings.Networks[networkName]
-			if !ok {
-				return NewUnknownNetworkError(networkName)
+		if networkName != "" {
+			var IPAddress string
+			if networkName == "default" {
+				IPAddress = inspect.NetworkSettings.IPAddress
+			} else {
+				log.Debugf("using network %q", networkName)
+				network, ok := inspect.NetworkSettings.Networks[networkName]
+				if !ok {
+					return NewUnknownNetworkError(networkName)
+				}
+				IPAddress = network.IPAddress
 			}
-			IPAddress = network.IPAddress
-		}
-		ip := net.ParseIP(IPAddress)
-		if ip == nil {
-			return NewInvalidIPAddressError(IPAddress)
+			ip := net.ParseIP(IPAddress)
+			if ip == nil {
+				return NewInvalidIPAddressError(IPAddress)
+			}
+
+			if ip.To4() != nil {
+				records = append(records, record{dns.TypeA, ip})
+			} else {
+				records = append(records, record{dns.TypeAAAA, ip})
+			}
 		}
 
-		if ip.To4() != nil {
-			records = append(records, record{dns.TypeA, ip})
-		} else {
-			records = append(records, record{dns.TypeAAAA, ip})
+		if domain == "" {
+			if cd.useContainerName {
+				domain = strings.ToLower(strings.ReplaceAll(inspect.Name, "/", ""))
+			} else if cd.useHostName {
+				domain = inspect.Config.Hostname
+			} else {
+				log.Warningf("no domain name found for group %q of %q", group, inspect.Name)
+				continue
+			}
+
+			domain = dnsutil.Join(domain, cd.baseDomain)
 		}
+
+		if _, ok := dns.IsDomainName(domain); !ok {
+			log.Errorf("invalid domain for group %q of %q", group, inspect.Name)
+			return NewInvalidDomainError(domain)
+		}
+
+		if cd.records.get(domain) != nil {
+			log.Warningf("duplicate domain definition in group %q of %q", group, inspect.Name)
+			continue
+		}
+
+		if len(records) == 0 {
+			log.Infof("no records for group %q of %q created", group, inspect.Name)
+		}
+
+		for _, record := range records {
+			clog.Debugf("created record %q, type %q", record.Value, record.Type)
+		}
+
+		cd.records.set(dns.Fqdn(domain), records)
 	}
 
-	if len(records) == 0 {
-		log.Infof("no record for container %q created", inspect.Name)
-	}
-
-	for _, record := range records {
-		clog.Debugf("created record %q, type %q", record.Value, record.Type)
-	}
-
-	cd.records.set(dns.Fqdn(domain), records)
 	return nil
 }
 
 func (cd *ContainerDiscovery) removeRecords(inspect container.InspectResponse) error {
-	var domain string
-	if cd.useHostName {
-		domain = inspect.Config.Hostname
+	groups, err := parseLabels(inspect.Config.Labels, cd.labelPrefix)
+	if err != nil {
+		return err
 	}
 
-	if cd.useContainerName {
-		domain = strings.ToLower(strings.ReplaceAll(inspect.Name, "/", ""))
+	for group, labels := range groups {
+		var domain string
+		for _, label := range labels {
+			if label.Type == Domain {
+				domain = label.Value
+			}
+		}
+
+		if domain == "" {
+			if cd.useContainerName {
+				domain = strings.ToLower(strings.ReplaceAll(inspect.Name, "/", ""))
+			} else if cd.useHostName {
+				domain = inspect.Config.Hostname
+			} else {
+				log.Warningf("no domain name found for group %q of %q", group, inspect.Name)
+				continue
+			}
+
+			domain = dnsutil.Join(domain, cd.baseDomain)
+		}
+
+		if _, ok := dns.IsDomainName(domain); !ok {
+			log.Errorf("invalid domain for group %q of %q", group, inspect.Name)
+			return NewInvalidDomainError(domain)
+		}
+		cd.records.delete(dns.Fqdn(domain))
 	}
-
-	domain = dnsutil.Join(domain, cd.baseDomain)
-
-	value, ok := inspect.Config.Labels[fmt.Sprintf("%s.%s", cd.labelPrefix, labelDomain)]
-	if ok {
-		domain = value
-	}
-
-	if _, ok := dns.IsDomainName(domain); !ok {
-		return NewInvalidDomainError(domain)
-	}
-
-	cd.records.delete(dns.Fqdn(domain))
 	return nil
 }
 
@@ -346,15 +367,9 @@ func (cd *ContainerDiscovery) ServeDNS(ctx context.Context, w dns.ResponseWriter
 		return plugin.NextOrFailure(cd.Name(), cd.Next, ctx, w, r)
 	}
 
-	answers := []dns.RR{}
 	records := cd.records.get(qname)
-
+	var answers []dns.RR
 	switch state.QType() {
-	case dns.TypeANY:
-		m := new(dns.Msg)
-		m.SetReply(r)
-		w.WriteMsg(m)
-		return dns.RcodeNotImplemented, nil
 
 	case dns.TypePTR:
 		names := cd.records.reverseGet(dnsutil.ExtractAddressFromReverse(qname))
@@ -378,7 +393,10 @@ func (cd *ContainerDiscovery) ServeDNS(ctx context.Context, w dns.ResponseWriter
 
 	if len(answers) == 0 && len(records) == 0 {
 		log.Debugf("no record for %q found", qname)
-		return plugin.NextOrFailure(cd.Name(), cd.Next, ctx, w, r)
+		if cd.Fall.Through(qname) {
+			return plugin.NextOrFailure(cd.Name(), cd.Next, ctx, w, r)
+		}
+		return dns.RcodeServerFailure, nil
 	}
 
 	m := new(dns.Msg)
@@ -396,10 +414,6 @@ func (cd *ContainerDiscovery) ServeDNS(ctx context.Context, w dns.ResponseWriter
 }
 
 func filterByType(records []record, Type uint16) []record {
-	if Type == dns.TypeANY {
-		return records
-	}
-
 	var ret []record
 	for _, record := range records {
 		if record.Type == Type {
@@ -443,13 +457,13 @@ func aaaa(name string, records []record) []dns.RR {
 }
 
 func cname(name string, records []record) []dns.RR {
-	answers := make([]dns.RR, len(records))
-	for i, record := range records {
-		answers[i] = &dns.CNAME{
-			Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 1800},
-			Target: record.Value.(string),
-		}
+	if len(records) > 1 {
+		log.Warningf("found multiple cname records for %q", name)
 	}
+	answers := []dns.RR{&dns.CNAME{
+		Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 1800},
+		Target: records[0].Value.(string),
+	}}
 	return answers
 }
 

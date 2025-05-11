@@ -19,6 +19,7 @@ const (
 
 type config struct {
 	endpoint         string
+	zones            []string
 	exposeByDefault  bool
 	labelPrefix      string
 	network          string
@@ -45,6 +46,7 @@ func setup(c *caddy.Controller) error {
 
 	cl := newContainerDiscovery(config)
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
+		cl.Fall.SetZonesFromArgs(config.zones)
 		cl.Next = next
 		return cl
 	})
@@ -104,6 +106,8 @@ func parse(c *caddy.Controller) (*config, error) {
 			config.endpoint = args[0]
 		}
 
+		config.zones = plugin.OriginsFromArgsOrServerBlock(args, c.ServerBlockKeys)
+
 		for c.NextBlock() {
 			switch strings.ToLower(c.Val()) {
 			case "exposebydefault":
@@ -145,6 +149,12 @@ func parse(c *caddy.Controller) (*config, error) {
 
 			case "usehostname":
 				if config.useHostName, err = boolArg(c); err != nil {
+					return nil, err
+				}
+
+			case "network":
+				config.network, err = stringArg(c)
+				if err != nil {
 					return nil, err
 				}
 
